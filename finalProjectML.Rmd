@@ -1,0 +1,136 @@
+---
+title: "Machine Learning Final Project"
+author: "Joakim Kalvenes"
+date: "February 5, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Forecasting of excercise movement accuracy
+
+### Synopsis
+
+In this investigation, we have evaluated machine learning models for forecasting the level of accuracy of exercise movement by human test subjects based on data collected by a personal activity tracking device.
+
+Six test subjects performed the same physical exercise using dumbells. Data from the movements were captured by accelerometers on the belt, forearm, arm, and dumbell of the six subjects. The subjects were asked to perform dumbell lifts correctly and incorrectly in 5 different ways. The training set captures the way in which the movements were performed (labeled "A", "B", "C", "D", and "E") as well as the related accelerometer readings.
+
+### Data Processing
+
+In this section, we describe the acquisition, reading, pre-processing, and
+analysis of the human activity recognition data.
+
+#### Data Set
+
+The original human activity recognition data set was collected by Wallace Ugulino, Eduardo Velloso, and Hugo Fuks. Please refer to their [website](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) as well as their paper for additional information:
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+
+The [training data set](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) as well as the [test data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) used in this study were downloaded from the course data repository website to a local directory.
+
+#### Reading and Unzipping the Data
+
+We assume that the training and testing data files, pml-training.csv and pml-testing.csv, respectively, are in the local directory.
+
+```{r}
+# Load all required libraries
+library(caret)
+library(gbm)
+library(e1071)
+library(randomForest)
+```
+
+Set the seed (for reproducibility) and read the training data from file.
+
+```{r}
+set.seed(10000)
+pmlData <- read.csv("pml-training.csv",header=TRUE)
+#
+# Keep only columns that have data. Also, drop columns related to start times, etc.
+#
+keepCols <- c(2,37,38,39,40,41,42,43,44,45,46,47,48,49,60,61,62,63,64,65,66,67,68,84,85,86,
+              102,113,114,115,116,117,118,119,120,121,122,123,124,140,151,152,153,154,155,156,157,158,159,160)
+pmlDataRedux <- pmlData[,keepCols]
+```
+
+Next, we split the training data set into three parts: training (60%), testing (20%), and validation (20%).
+
+```{r}
+inTrain <- createDataPartition(y=pmlDataRedux$classe,p=0.6,list=FALSE)
+training <- pmlDataRedux[inTrain,] # 60% of sample for training
+testingValidating <- pmlDataRedux[-inTrain,]
+inTest <- createDataPartition(y=testingValidating$classe,p=0.5,list=FALSE)
+testing <- testingValidating[inTest,] # 20% of sample for testing
+validating <- testingValidating[-inTest,] # 20% of sample for validation
+```
+
+With 54 variables, dimensionality reduction might be necessary. It will speed up convergence and eliminate correlation in the predictors.
+
+```{r}
+transPCA <- preProcess(training[,-54],method="pca",thresh=0.9)
+trainPCA <- predict(transPCA,training)
+testPCA <- predict(transPCA,testing)
+validPCA <- predict(transPCA,validating)
+```
+
+A priori, we do not know which machine learning algorithm will perform the best, so we will try a number of them to find one that works well (as determined by application to the testing set of the data). Specifically, we will fit:
+
+- Random forest
+- Linear discriminant analysis
+- Support vector machine (with radial kernel)
+
+```{r, cache=TRUE}
+modFitLda <- train(classe~.,method="lda",data=trainPCA)
+modFitSvm <- svm(classe~.,trainPCA,model="radial")
+modFitRf <- train(classe~.,method="rf",data=trainPCA,ntree=100)
+```
+
+Next, we predict outcome on the test data for each model and display a summary of the prediction accuracy on the test data for each of the three respective models.
+
+```{r}
+predictLda <- predict(modFitLda,testPCA)
+predictSvm <- predict(modFitSvm, testPCA)
+predictRf <- predict(modFitRf,testPCA)
+confusionMatrix(testing$classe,predictLda)$overall
+confusionMatrix(testing$classe,predictSvm)$overall
+confusionMatrix(testing$classe,predictRf)$overall
+```
+
+As we can see, the linear discriminant analysis model is not doing so well, so we will discard it from further consideration. The other two models look promising and we will try out an ensemble model to see if we can improve upon the forecasting accuracy. The general idea is the following: We take the forecasts from the support vector machine model and the random forest model and combine them into a paired set of forecasts together with the actual results from the test data. Each row in the data set will consist of three values for the movement classification, namely forecast class by SVM, forecast class by RF, and actual class. For example, a row might have values A, B, A. We then fit a new random forest to this data set. Finally, we apply the fitted ensemble model to the validation data to produce an estimate of the final model accuracy.
+
+```{r}
+stackedData <- data.frame(predictSvm,predictRf,classe=testing$classe)
+modFitStacked <- train(classe~.,method="rf",data=stackedData,ntree=100)
+# Use validation sample to estimate ensemble model accuracy
+validationStacked <- predict(modFitStacked,validPCA)
+confusionMatrix(validating$classe,validationStacked)$overall
+```
+
+The performance of the ensemble model is not statistically different from that of the random forest applied to the principal components of the raw data set, but it was an interesting exercise (for me).
+
+The final part of the project is to forecast the movement classification for 20 test cases. We read them from file and bring them into the same format as the training data. This includes renaming some of the columns, matching up the factor levels to the training set, and applying the principal components generated on the training data.
+
+```{r}
+pmlForecastData <- read.csv("pml-testing.csv")
+pmlForecastData <- pmlForecastData[,keepCols]
+pmlFCPCA <- predict(transPCA,pmlForecastData)
+colnames(pmlFCPCA)[2] <- "classe" # rename column to match name in previously trained models
+# Match up factor levels for SVM model
+ufactor <- levels(trainPCA$user_name)
+cfactor <- levels(trainPCA$classe)
+levels(pmlFCPCA$user_name) <- ufactor
+levels(pmlFCPCA$classe) <- cfactor
+```
+
+Finally, we forecast each of the base models (SVM and RF, respectively) on the principal components of the raw test data. Then, we collate the forecasts from the base models and apply the ensemble model random forest to produce the final forecast.
+
+```{r}
+predictTestSvm <- predict(modFitSvm, pmlFCPCA)
+predictTestRf <- predict(modFitRf,pmlFCPCA)
+stackedTestData <- data.frame(predictTestSvm,predictTestRf,classe=pmlFCPCA$classe)
+# Re-name columns to fit training model
+colnames(stackedTestData) <- colnames(stackedData)
+predict(modFitStacked,stackedTestData)
+```
